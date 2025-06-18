@@ -10,3 +10,4 @@
 <li>Subshell Support</li>
 <li>Bang (!) Exit Code Negation</li>
 <li>Multi-line Separation with \</li>
+<li>Pipes!</li>
