@@ -312,6 +312,22 @@ int execute_chain(char *chain) {
 
     return local_status;
 }
+int check_for_continuation(char *line){
+    int len = strlen(line);
+    if (len==0){
+        return 0;
+    }
+    if(line[len-1]=='\\'){
+        line[len-1]='\0';
+        return 1;
+    }
+    if(len>=2){
+        if(strcmp(&line[len-2],"&&")==0 || strcmp(&line[len-2],"||")==0){
+            return 2;
+        }
+    }
+    return 0;
+}
 /*
  * The main loop of pish. Repeat until the "exit" command or EOF:
  * 1. Print the prompt
@@ -321,31 +337,83 @@ int execute_chain(char *chain) {
  * Assume that each command never exceeds MAX_COMMAND_LENGTH-1 chars.
  */
 int pish(FILE *fp) {
-    char full_line[MAX_COMMAND_LENGTH];
-    if (script_mode == 0) {
-        prompt();
-    }
-    while (fgets(full_line, MAX_COMMAND_LENGTH, fp) != NULL) {
-        if (strlen(full_line) > 0 && full_line[strlen(full_line) - 1] == '\n') {
-            full_line[strlen(full_line) - 1] = '\0';
+    while (1) {
+        if (!script_mode) {
+            prompt();
         }
 
-        char *command = trim_whitespace(full_line);
-        if (strlen(command) > 0) {
-            char *command_copy = strdup(command);
+        char *full_command = NULL;
+        int continuation_type = 0;
+        do {
+            char line_buffer[MAX_COMMAND_LENGTH];
+
+            if (fgets(line_buffer, MAX_COMMAND_LENGTH, fp) == NULL) {
+                if (full_command) {
+                    last_exit_status = execute_chain(full_command);
+                }
+                if (!script_mode && isatty(fileno(stdin))) printf("\n");
+                return last_exit_status;
+            }
+
+            line_buffer[strcspn(line_buffer, "\n")] = 0;
+
+            char *trimmed_line = trim_whitespace(line_buffer);
+
+            if (full_command == NULL) {
+                full_command = strdup(trimmed_line);
+                if (full_command == NULL) {
+                    perror("strdup failed");
+                    exit(EXIT_FAILURE);
+                }
+            } else {
+                const char *separator;
+                if(continuation_type==1){
+                    separator = "";
+                }
+                else{
+                    separator = " ";
+                }
+                size_t old_len = strlen(full_command);
+                size_t sep_len = strlen(separator);
+                size_t new_part_len = strlen(trimmed_line);
+
+                char* new_full_command = realloc(full_command, old_len + sep_len + new_part_len + 1);
+                if (new_full_command == NULL) {
+                    perror("realloc failed");
+                    exit(EXIT_FAILURE);
+                }
+                full_command = new_full_command;
+                
+                strcat(full_command, separator);
+                strcat(full_command, trimmed_line);
+            }
+
+            continuation_type = check_for_continuation(full_command);
+
+            if (continuation_type != 0 && !script_mode) {
+                printf("> ");
+                fflush(stdout);
+            }
+        } while (continuation_type != 0);
+        
+        if (full_command && strlen(full_command) > 0) {
+            char *command_copy = strdup(full_command);
             if (command_copy == NULL) {
                 perror("strdup failed");
                 exit(EXIT_FAILURE);
             }
             last_exit_status = execute_chain(command_copy);
             free(command_copy);
+        } else {
+             last_exit_status = 0;
         }
 
-        if (script_mode == 0) {
-            prompt();
+        if (full_command) {
+            free(full_command);
+            full_command = NULL;
         }
     }
-    return 0;
+    return last_exit_status;
 }
 
 /*
