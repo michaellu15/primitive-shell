@@ -344,18 +344,25 @@ int execute_chain(char *chain) {
             } else {
                 exit(last_exit_status);
             }
-        } else if (strcmp(cmd->argv[0], "history") == 0) {
+        }
+        // if the executed command is history
+        else if (strcmp(cmd->argv[0], "history") == 0) {
+            // print history if just history
             if (cmd->argc == 1) {
                 print_history();
                 local_status = 0;
-            } else if (cmd->argc == 2 && (strcmp(cmd->argv[1], "-c") == 0)) {
+            }
+            // clear history if requested
+            else if (cmd->argc == 2 && (strcmp(cmd->argv[1], "-c") == 0)) {
                 clear_history();
                 local_status = 0;
             } else {
                 usage_error();
                 local_status = 1;
             }
-        } else if (strcmp(cmd->argv[0], "exec") == 0) {
+        }
+        // handle exec, replacing the shell
+        else if (strcmp(cmd->argv[0], "exec") == 0) {
             if (cmd->argc < 2) {
                 usage_error();
                 local_status = 1;
@@ -364,13 +371,13 @@ int execute_chain(char *chain) {
                 perror(cmd->argv[1]);
                 exit(127);
             }
-        } else {
+        }
+        // if it isn't a built-in command, run the command
+        else {
             run(cmd);
             local_status = last_exit_status;
         }
-
-        if (script_mode == 0 && cmd->argc != 0) {
-        }
+        // free created cmd struct
         for (int i = 0; i < cmd->argc; i++) {
             free(cmd->argv[i]);
         }
@@ -379,6 +386,13 @@ int execute_chain(char *chain) {
 
     return local_status;
 }
+/*
+ * This function takes an inputted line and checks if the line should cause a
+ * continuation i.e it ends in \ or && or ||
+ * @param line      The line to check
+ * @return          0 if no continuation should occur, 1 if is a \ character, 2
+ * if it is a && or an ||
+ */
 int check_for_continuation(char *line) {
     int len = strlen(line);
     if (len == 0) {
@@ -397,54 +411,65 @@ int check_for_continuation(char *line) {
     return 0;
 }
 /*
- * The main loop of pish. Repeat until the "exit" command or EOF:
- * 1. Print the prompt
- * 2. Read command from fp (which can be stdin or a script file)
- * 3. Execute the command
- *
- * Assume that each command never exceeds MAX_COMMAND_LENGTH-1 chars.
+ * The main loop of pish.
+ * @param fp    The input for the shell, stdin or a script
+ * @return      Returns the exit status of the shell
  */
 int pish(FILE *fp) {
     while (1) {
+        // prompt the user if the shell is not in script mode
         if (!script_mode) {
             prompt();
         }
-
         char *full_command = NULL;
         int continuation_type = 0;
+        // do while loop runs until there is no more continuation, it handles
+        // the continuation of the commands
         do {
             char line_buffer[MAX_COMMAND_LENGTH];
-
+            // if there is no more lines to run then execute the previously
+            // stored command
             if (fgets(line_buffer, MAX_COMMAND_LENGTH, fp) == NULL) {
+                // if there exists a previous command, execute it
                 if (full_command) {
                     last_exit_status = execute_chain(full_command);
                 }
+                // if we are not in script mode and the file is stdin, print a
+                // new line
                 if (!script_mode && isatty(fileno(stdin)))
                     printf("\n");
                 return last_exit_status;
             }
-
-            line_buffer[strcspn(line_buffer, "\n")] = 0;
+            // null-terminate the buffer at the new line character (enter
+            // character)
+            line_buffer[strcspn(line_buffer, "\n")] = '\0';
 
             char *trimmed_line = trim_whitespace(line_buffer);
-
+            // if this is the first line of a command then store it in
+            // full_command
             if (full_command == NULL) {
                 full_command = strdup(trimmed_line);
                 if (full_command == NULL) {
                     perror("strdup failed");
                     exit(EXIT_FAILURE);
                 }
-            } else {
+            }
+            // otherwise, handle the successive execution
+            else {
                 const char *separator;
+                // continutation type = 1 means it ends with a \ character,
+                // otherwise its a && or a ||
                 if (continuation_type == 1) {
                     separator = "";
                 } else {
                     separator = " ";
                 }
+                // need to keep track of lengths to modify full_command size in
+                // memory
                 size_t old_len = strlen(full_command);
                 size_t sep_len = strlen(separator);
                 size_t new_part_len = strlen(trimmed_line);
-
+                // allocate more memory for the additional lines
                 char *new_full_command =
                     realloc(full_command, old_len + sep_len + new_part_len + 1);
                 if (new_full_command == NULL) {
@@ -452,36 +477,39 @@ int pish(FILE *fp) {
                     exit(EXIT_FAILURE);
                 }
                 full_command = new_full_command;
-
+                // add the added lines and the corresponding space if it needs
+                // one
                 strcat(full_command, separator);
                 strcat(full_command, trimmed_line);
             }
 
             continuation_type = check_for_continuation(full_command);
-
+            // print out the continuation message if it isn't in script mode
             if (continuation_type != 0 && !script_mode) {
                 printf("> ");
                 fflush(stdout);
             }
         } while (continuation_type != 0);
-
+        // if the full command isn't null or empty
         if (full_command && strlen(full_command) > 0) {
-            if(!script_mode){
+            // add the command to history
+            if (!script_mode) {
                 char *history_copy = strdup(full_command);
-                if(history_copy==NULL){
+                if (history_copy == NULL) {
                     perror("strdup failed for history");
                     exit(EXIT_FAILURE);
                 }
                 struct pish_arg history_arg;
                 parse_command(history_copy, &history_arg);
-                if(history_arg.argc>0){
+                if (history_arg.argc > 0) {
                     add_history(&history_arg);
                 }
-                for(int i = 0; i<history_arg.argc;i++){
+                for (int i = 0; i < history_arg.argc; i++) {
                     free(history_arg.argv[i]);
                 }
                 free(history_copy);
             }
+            // execute the command chain
             char *command_copy = strdup(full_command);
             if (command_copy == NULL) {
                 perror("strdup failed");
@@ -492,7 +520,6 @@ int pish(FILE *fp) {
         } else {
             last_exit_status = 0;
         }
-
         if (full_command) {
             free(full_command);
             full_command = NULL;
@@ -503,18 +530,15 @@ int pish(FILE *fp) {
 
 /*
  * The entry point of the pish program.
- *
- * - If the program is called with no additional arguments (like "./pish"),
- *   process commands from stdin.
- * - If the program is called with one additional argument
- *   (like "./pish script.sh"), process commands from the file specified by the
- *   additional argument under script mode.
- * - If there are more arguments, call usage_error() and exit with status 1.
+ * @param argv      Stores the script which the shell should run
  */
 int main(int argc, char *argv[]) {
+    // if there is no script, assume the input is stdin
     if (argc == 1) {
         pish(stdin);
-    } else if (argc == 2) {
+    }
+    // run the shell in script mode if there is a script to run
+    else if (argc == 2) {
         script_mode = 1;
         FILE *fp = fopen(argv[1], "r");
         if (fp == NULL) {
