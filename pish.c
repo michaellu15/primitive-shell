@@ -171,6 +171,68 @@ int run_subshell(char *command_str) {
         }
     }
 }
+/*
+ * The function is responsible for handling pipes between a left and a right command
+ * @param left_cmd      The command at the left of the pipe
+ * @param right_cmd     The command at the right of the pipe
+ * @return              The exit status of the command
+ */
+int run_pipe(char *left_cmd, char *right_cmd) {
+    pid_t left_pid;
+    pid_t right_pid;
+    int p[2];
+    int status;
+    //create the pipe
+    if (pipe(p) < 0) {
+        perror("pipe");
+        return 1;
+    }
+    //handle the left command
+    left_pid = fork();
+    if (left_pid < 0) {
+        perror("fork");
+        return 1;
+    }
+    if (left_pid == 0) {
+        // close the read end of the pipe
+        close(p[0]);
+        // re-direct stdout to the write end of the pipe
+        dup2(p[1], STDOUT_FILENO);
+        // close the write end file descriptor
+        close(p[1]);
+        //run the left command but output is instead the write end of the pipe instead of stdout
+        int exit_status = execute_chain(left_cmd);
+        exit(exit_status);
+    }
+
+    right_pid = fork();
+    if (right_pid < 0) {
+        perror("fork");
+        return 1;
+    }
+    if (right_pid == 0) {
+        // close the write end of the pipe
+        close(p[1]);
+        // re-direct stdin to the read end of the pipe
+        dup2(p[0], STDIN_FILENO);
+
+        close(p[0]);
+        //run the right command but output is instead the read end of the the pipe instead of stdin
+        int exit_status = execute_chain(right_cmd);
+        exit(exit_status);
+    }
+    //close both ends of the pipe in the parent
+    close(p[0]);
+    close(p[1]);
+    //wait for the children to finish
+    waitpid(left_pid, NULL, 0);
+    waitpid(right_pid, &status, 0);
+    //return the exit status
+    if (WIFEXITED(status)) {
+        return WEXITSTATUS(status);
+    }
+    return 1;
+}
 static char prevDir[MAX_COMMAND_LENGTH];
 /*
  * This function is responsible for the execution of a command including the
@@ -181,7 +243,29 @@ static char prevDir[MAX_COMMAND_LENGTH];
 int execute_chain(char *chain) {
     // store the parenthesis level for the subshell
     int paren_level = 0;
-    char *scanner = chain;
+    char *scanner = chain + strlen(chain) - 1;
+    // parse the chain from right to left to check for pipes
+    while (scanner >= chain) {
+        if (*scanner == ')') {
+            paren_level++;
+        } else if (*scanner == '(') {
+            paren_level--;
+        }
+        // only handle pipes which are not inside subshells
+        else if (*scanner == '|' && paren_level == 0) {
+            // ensure that it is a pipe and not a ||
+            if (scanner != chain && *(scanner - 1) == '|') {
+                scanner--;
+            } else {
+                *scanner = '\0';
+                return run_pipe(chain, scanner + 1);
+            }
+        }
+        scanner--;
+    }
+
+    paren_level = 0;
+    scanner = chain;
     // parse the string for subshells and semi-colon separation
     while (*scanner != '\0') {
         if (*scanner == '(') {
@@ -391,7 +475,7 @@ int execute_chain(char *chain) {
  * continuation i.e it ends in \ or && or ||
  * @param line      The line to check
  * @return          0 if no continuation should occur, 1 if is a \ character, 2
- * if it is a && or an ||
+ * if it is a && or an ||, 3 if it is a pipe 
  */
 int check_for_continuation(char *line) {
     int len = strlen(line);
@@ -406,6 +490,11 @@ int check_for_continuation(char *line) {
         if (strcmp(&line[len - 2], "&&") == 0 ||
             strcmp(&line[len - 2], "||") == 0) {
             return 2;
+        }
+    }
+    if(len>=1){
+        if(line[len-1]=='|'&&(len==1||line[len-2]!='|')){
+            return 3;
         }
     }
     return 0;
@@ -458,7 +547,7 @@ int pish(FILE *fp) {
             else {
                 const char *separator;
                 // continutation type = 1 means it ends with a \ character,
-                // otherwise its a && or a ||
+                // otherwise its a && or a || or a | 
                 if (continuation_type == 1) {
                     separator = "";
                 } else {
