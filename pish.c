@@ -155,6 +155,17 @@ int run_redirect(char *command_str, char *file, int flags, int dest_fd) {
         perror("fork");
         return 1;
     } else if (pid == 0) {
+        char *target = file;
+        if(file[0]=='&'){
+            target=file+1;
+        }
+        if(strcmp(target,"-")==0){
+            if(close(dest_fd)<0){
+                perror("close");
+                exit(EXIT_FAILURE);
+            }
+            exit(execute_chain(command_str));
+        }
         // 0644 means that the file can be read by owner, users in the file
         // group, and anyone else on the system
         int fd = open(file, flags, 0644);
@@ -167,7 +178,11 @@ int run_redirect(char *command_str, char *file, int flags, int dest_fd) {
             perror("dup2");
             exit(EXIT_FAILURE);
         }
-        close(fd);
+        // only close if the opened fd is different from the destination fd so
+        // we don't close our dup2'd fd
+        if (fd != dest_fd) {
+            close(fd);
+        }
         // execute and store the exit status of the command it executes
         exit(execute_chain(command_str));
     } else {
@@ -372,66 +387,63 @@ int execute_chain(char *chain) {
     while (scanner >= chain) {
         if (*scanner == ')') {
             paren_level++;
-        } else if (*scanner == '(') {
+            scanner--;
+            continue;
+        }
+        if (*scanner == '(') {
             paren_level--;
-        } else if (paren_level == 0) {
-            if (*scanner == '>') {
-                // the token following the redirection operator is the file name
-                char *file = trim_whitespace(scanner + 1);
-                // this if statement checks for ">>"
-                if (scanner > chain && *(scanner - 1) == '>') {
-                    // this if statement checks for "2>>"
-                    if (scanner > chain + 1 && *(scanner - 2) == '2') {
-                        *(scanner - 2) = '\0';
-                        return run_redirect(chain, file,
-                                            O_WRONLY | O_CREAT | O_APPEND,
-                                            STDERR_FILENO);
-                    } else {
-                        // else runs if we have a ">>"
-                        *(scanner - 1) = '\0';
-                        return run_redirect(chain, file,
-                                            O_WRONLY | O_CREAT | O_APPEND,
-                                            STDOUT_FILENO);
-                    }
-                } else if (scanner > chain && *(scanner - 1) == '2') {
-                    // else if runs if we have a "2>"
-                    *(scanner - 1) = '\0';
-                    return run_redirect(chain, file,
-                                        O_WRONLY | O_CREAT | O_TRUNC,
-                                        STDERR_FILENO);
-                } else if (scanner > chain && *(scanner - 1) == '1') {
-                    // else if runs if we have a "1>"
-                    *(scanner - 1) = '\0';
-                    return run_redirect(chain, file,
-                                        O_WRONLY | O_CREAT | O_TRUNC,
-                                        STDOUT_FILENO);
-                } else if (scanner > chain && *(scanner - 1) == '<') {
-                    // else if runs if we have a "<>"
-                    if (scanner > chain + 1 && *(scanner - 2) == '1') {
-                        // if statement runs if we have a "1<>"
-                        *(scanner - 2) = '\0';
-                        return run_redirect(chain, file, O_RDWR | O_CREAT,
-                                            STDOUT_FILENO);
-                    } else {
-                        // else runs if we have a "2<>"
-                        *(scanner - 1) = '\0';
-                        return run_redirect(chain, file, O_RDWR | O_CREAT,
-                                            STDIN_FILENO);
-                    }
+            scanner--;
+            continue;
+        }
+        if (paren_level != 0) {
+            scanner--;
+            continue;
+        }
+        if (*scanner == '>' || *scanner == '<') {
+            char *op_end = scanner;
+            char *op_start = scanner;
+            int flags;
+            int default_fd;
+            if (*op_end == '<') {
+                flags = O_RDONLY;
+                default_fd = STDIN_FILENO;
+            } else {
+                if (op_end > chain && *(op_end - 1) == '>') {
+                    op_start--;
+                    flags = O_WRONLY | O_CREAT | O_APPEND;
+                    default_fd = STDOUT_FILENO;
+                } else if (op_end > chain && *(op_end - 1) == '<') {
+                    op_start--;
+                    flags = O_RDWR | O_CREAT;
+                    default_fd = STDIN_FILENO;
                 } else {
-                    // else runs for a normal ">"
-                    *scanner = '\0';
-                    return run_redirect(chain, file,
-                                        O_WRONLY | O_CREAT | O_TRUNC,
-                                        STDOUT_FILENO);
+                    flags = O_WRONLY | O_CREAT | O_TRUNC;
+                    default_fd = STDOUT_FILENO;
                 }
-            } else if (*scanner == '<') {
-                // else if runs for a normal "<", other operators already
-                // scanned for
-                char *file = trim_whitespace(scanner + 1);
-                *scanner = '\0';
-                return run_redirect(chain, file, O_RDONLY, STDIN_FILENO);
             }
+            char *file = trim_whitespace(op_end + 1);
+            int dest_fd = default_fd;
+            char *term_point = op_start;
+
+            if (op_start > chain && isdigit(*(op_start - 1))) {
+                char *num_end = op_start - 1;
+                char *num_start = num_end;
+                while (num_start > chain && isdigit(*(num_start - 1))) {
+                    num_start--;
+                }
+                if (num_start == chain || isspace(*(num_start - 1))) {
+                    char num_buf[16];
+                    int len = (num_end - num_start) + 1;
+                    if (len < 15) {
+                        strncpy(num_buf, num_start, len);
+                        num_buf[len] = '\0';
+                        dest_fd = atoi(num_buf);
+                        term_point = num_start;
+                    }
+                }
+            }
+            *term_point = '\0';
+            return run_redirect(chain, file, flags, dest_fd);
         }
         scanner--;
     }
@@ -763,6 +775,7 @@ int main(int argc, char *argv[]) {
             return EXIT_FAILURE;
         }
         pish(fp);
+        fclose(fp);
     } else {
         usage_error();
         exit(1);
