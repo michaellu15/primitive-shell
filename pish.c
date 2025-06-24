@@ -1,4 +1,5 @@
 #include <ctype.h>
+#include <fcntl.h>
 #include <pwd.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -141,6 +142,48 @@ void run(struct pish_arg *arg) {
 }
 int execute_chain(char *chain);
 /*
+ * Run a redirection
+ * @param command_str The full command string
+ * @param file        The file to redirect output/input to
+ * @param flags       The flags for open() for the specific redirection
+ * @param dest_fd     The file descriptor for the file to redirect to
+ * @return The exit status of the command
+ */
+int run_redirect(char *command_str, char *file, int flags, int dest_fd) {
+    pid_t pid = fork();
+    if (pid < 0) {
+        perror("fork");
+        return 1;
+    } else if (pid == 0) {
+        // 0644 means that the file can be read by owner, users in the file
+        // group, and anyone else on the system
+        int fd = open(file, flags, 0644);
+        if (fd < 0) {
+            perror(file);
+            exit(EXIT_FAILURE);
+        }
+        // redirect output towards fd to dest_fd
+        if (dup2(fd, dest_fd) < 0) {
+            perror("dup2");
+            exit(EXIT_FAILURE);
+        }
+        close(fd);
+        // execute and store the exit status of the command it executes
+        exit(execute_chain(command_str));
+    } else {
+        int status;
+        // wait for the child process to finish and store the exit status of the
+        // process in status
+        waitpid(pid, &status, 0);
+        if (WIFEXITED(status)) {
+            // return the returned status
+            return WEXITSTATUS(status);
+        }
+        // unsuccessful exit
+        return 1;
+    }
+}
+/*
  * This method handles the execution of a subshell
  * @param command_str    The command to be run in the subshell without the
  * beginning and trailing parenthesis
@@ -172,7 +215,8 @@ int run_subshell(char *command_str) {
     }
 }
 /*
- * The function is responsible for handling pipes between a left and a right command
+ * The function is responsible for handling pipes between a left and a right
+ * command
  * @param left_cmd      The command at the left of the pipe
  * @param right_cmd     The command at the right of the pipe
  * @return              The exit status of the command
@@ -182,12 +226,12 @@ int run_pipe(char *left_cmd, char *right_cmd) {
     pid_t right_pid;
     int p[2];
     int status;
-    //create the pipe
+    // create the pipe
     if (pipe(p) < 0) {
         perror("pipe");
         return 1;
     }
-    //handle the left command
+    // handle the left command
     left_pid = fork();
     if (left_pid < 0) {
         perror("fork");
@@ -200,7 +244,8 @@ int run_pipe(char *left_cmd, char *right_cmd) {
         dup2(p[1], STDOUT_FILENO);
         // close the write end file descriptor
         close(p[1]);
-        //run the left command but output is instead the write end of the pipe instead of stdout
+        // run the left command but output is instead the write end of the pipe
+        // instead of stdout
         int exit_status = execute_chain(left_cmd);
         exit(exit_status);
     }
@@ -217,17 +262,18 @@ int run_pipe(char *left_cmd, char *right_cmd) {
         dup2(p[0], STDIN_FILENO);
 
         close(p[0]);
-        //run the right command but output is instead the read end of the the pipe instead of stdin
+        // run the right command but output is instead the read end of the the
+        // pipe instead of stdin
         int exit_status = execute_chain(right_cmd);
         exit(exit_status);
     }
-    //close both ends of the pipe in the parent
+    // close both ends of the pipe in the parent
     close(p[0]);
     close(p[1]);
-    //wait for the children to finish
+    // wait for the children to finish
     waitpid(left_pid, NULL, 0);
     waitpid(right_pid, &status, 0);
-    //return the exit status
+    // return the exit status
     if (WIFEXITED(status)) {
         return WEXITSTATUS(status);
     }
@@ -243,30 +289,8 @@ static char prevDir[MAX_COMMAND_LENGTH];
 int execute_chain(char *chain) {
     // store the parenthesis level for the subshell
     int paren_level = 0;
-    char *scanner = chain + strlen(chain) - 1;
-    // parse the chain from right to left to check for pipes
-    while (scanner >= chain) {
-        if (*scanner == ')') {
-            paren_level++;
-        } else if (*scanner == '(') {
-            paren_level--;
-        }
-        // only handle pipes which are not inside subshells
-        else if (*scanner == '|' && paren_level == 0) {
-            // ensure that it is a pipe and not a ||
-            if (scanner != chain && *(scanner - 1) == '|') {
-                scanner--;
-            } else {
-                *scanner = '\0';
-                return run_pipe(chain, scanner + 1);
-            }
-        }
-        scanner--;
-    }
-
-    paren_level = 0;
-    scanner = chain;
-    // parse the string for subshells and semi-colon separation
+    char *scanner = chain;
+    // parse the string for subshells and semi-colon separation (1st priority)
     while (*scanner != '\0') {
         if (*scanner == '(') {
             // keep track of the level of parenthesis
@@ -284,10 +308,10 @@ int execute_chain(char *chain) {
         }
         scanner++;
     }
-
     paren_level = 0;
     scanner = chain;
-    // re-parse the string for parenthesis and && and || separation
+    // re-parse the string for parenthesis and && and || separation (2nd
+    // priority)
     while (*scanner != '\0') {
         if (*scanner == '(') {
             paren_level++;
@@ -319,6 +343,97 @@ int execute_chain(char *chain) {
             }
         }
         scanner++;
+    }
+    scanner = chain + strlen(chain) - 1;
+    paren_level = 0;
+    // parse the chain from right to left to check for pipes (3rd priority)
+    while (scanner >= chain) {
+        if (*scanner == ')') {
+            paren_level++;
+        } else if (*scanner == '(') {
+            paren_level--;
+        }
+        // only handle pipes which are not inside subshells
+        else if (*scanner == '|' && paren_level == 0) {
+            // ensure that it is a pipe and not a ||
+            if (scanner != chain && *(scanner - 1) == '|') {
+                scanner--;
+            } else {
+                *scanner = '\0';
+                return run_pipe(chain, scanner + 1);
+            }
+        }
+        scanner--;
+    }
+    paren_level = 0;
+    scanner = chain + strlen(chain) - 1;
+    // parse the chain from right to left to check for redirection operators
+    // (lowest priority)
+    while (scanner >= chain) {
+        if (*scanner == ')') {
+            paren_level++;
+        } else if (*scanner == '(') {
+            paren_level--;
+        } else if (paren_level == 0) {
+            if (*scanner == '>') {
+                // the token following the redirection operator is the file name
+                char *file = trim_whitespace(scanner + 1);
+                // this if statement checks for ">>"
+                if (scanner > chain && *(scanner - 1) == '>') {
+                    // this if statement checks for "2>>"
+                    if (scanner > chain + 1 && *(scanner - 2) == '2') {
+                        *(scanner - 2) = '\0';
+                        return run_redirect(chain, file,
+                                            O_WRONLY | O_CREAT | O_APPEND,
+                                            STDERR_FILENO);
+                    } else {
+                        // else runs if we have a ">>"
+                        *(scanner - 1) = '\0';
+                        return run_redirect(chain, file,
+                                            O_WRONLY | O_CREAT | O_APPEND,
+                                            STDOUT_FILENO);
+                    }
+                } else if (scanner > chain && *(scanner - 1) == '2') {
+                    // else if runs if we have a "2>"
+                    *(scanner - 1) = '\0';
+                    return run_redirect(chain, file,
+                                        O_WRONLY | O_CREAT | O_TRUNC,
+                                        STDERR_FILENO);
+                } else if (scanner > chain && *(scanner - 1) == '1') {
+                    // else if runs if we have a "1>"
+                    *(scanner - 1) = '\0';
+                    return run_redirect(chain, file,
+                                        O_WRONLY | O_CREAT | O_TRUNC,
+                                        STDOUT_FILENO);
+                } else if (scanner > chain && *(scanner - 1) == '<') {
+                    // else if runs if we have a "<>"
+                    if (scanner > chain + 1 && *(scanner - 2) == '1') {
+                        // if statement runs if we have a "1<>"
+                        *(scanner - 2) = '\0';
+                        return run_redirect(chain, file, O_RDWR | O_CREAT,
+                                            STDOUT_FILENO);
+                    } else {
+                        // else runs if we have a "2<>"
+                        *(scanner - 1) = '\0';
+                        return run_redirect(chain, file, O_RDWR | O_CREAT,
+                                            STDIN_FILENO);
+                    }
+                } else {
+                    // else runs for a normal ">"
+                    *scanner = '\0';
+                    return run_redirect(chain, file,
+                                        O_WRONLY | O_CREAT | O_TRUNC,
+                                        STDOUT_FILENO);
+                }
+            } else if (*scanner == '<') {
+                // else if runs for a normal "<", other operators already
+                // scanned for
+                char *file = trim_whitespace(scanner + 1);
+                *scanner = '\0';
+                return run_redirect(chain, file, O_RDONLY, STDIN_FILENO);
+            }
+        }
+        scanner--;
     }
     // keep track of the local exit status
     int local_status = 0;
@@ -475,28 +590,41 @@ int execute_chain(char *chain) {
  * continuation i.e it ends in \ or && or ||
  * @param line      The line to check
  * @return          0 if no continuation should occur, 1 if is a \ character, 2
- * if it is a && or an ||, 3 if it is a pipe 
+ * if it is a && or an ||, 3 if it is a pipe
  */
 int check_for_continuation(char *line) {
     int len = strlen(line);
     if (len == 0) {
         return 0;
     }
-    if (line[len - 1] == '\\') {
+    char *line_copy = strdup(line);
+    if (!line_copy) {
+        perror("strdup");
+        exit(EXIT_FAILURE);
+    }
+    char *trimmed_line = trim_whitespace(line_copy);
+    len = strlen(trimmed_line);
+    if (len > 0 && line[len - 1] == '\\') {
         line[len - 1] = '\0';
+        free(line_copy);
         return 1;
     }
-    if (len >= 2) {
-        if (strcmp(&line[len - 2], "&&") == 0 ||
-            strcmp(&line[len - 2], "||") == 0) {
-            return 2;
-        }
+    if (len >= 2 && (strcmp(&trimmed_line[len - 2], "&&") == 0 ||
+                     strcmp(&trimmed_line[len - 2], "||") == 0)) {
+        free(line_copy);
+        return 2;
     }
-    if(len>=1){
-        if(line[len-1]=='|'&&(len==1||line[len-2]!='|')){
-            return 3;
-        }
+    if (len >= 1 && trimmed_line[len - 1] == '|' &&
+        (len < 2 || trimmed_line[len - 2] != '|')) {
+        free(line_copy);
+        return 3;
     }
+    if (len > 0 &&
+        (trimmed_line[len - 1] == '>' || trimmed_line[len - 1] == '<')) {
+        free(line_copy);
+        return 4;
+    }
+    free(line_copy);
     return 0;
 }
 /*
@@ -547,7 +675,7 @@ int pish(FILE *fp) {
             else {
                 const char *separator;
                 // continutation type = 1 means it ends with a \ character,
-                // otherwise its a && or a || or a | 
+                // otherwise its a && or a || or a |
                 if (continuation_type == 1) {
                     separator = "";
                 } else {
