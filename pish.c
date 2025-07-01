@@ -155,15 +155,18 @@ int run_redirect(char *command_str, char *file, int flags, int dest_fd) {
         perror("fork");
         return 1;
     } else if (pid == 0) {
+        // code executes the redirection
         char *target = file;
-        if(file[0]=='&'){
-            target=file+1;
+        if (file[0] == '&') {
+            target = file + 1;
         }
-        if(strcmp(target,"-")==0){
-            if(close(dest_fd)<0){
+        // if we have a moving file descritor ie <&(digit)-
+        if (strcmp(target, "-") == 0) {
+            if (close(dest_fd) < 0) {
                 perror("close");
                 exit(EXIT_FAILURE);
             }
+            // execute the command and also exit the child with the exit status
             exit(execute_chain(command_str));
         }
         // 0644 means that the file can be read by owner, users in the file
@@ -210,8 +213,11 @@ int run_subshell(char *command_str) {
         perror("fork");
         return 1;
     } else if (pid == 0) {
-        // recursively executes the line inside the subshell
+        // recursively executes the line inside the subshell as if another
+        // subshell exists inside of the subshell, it is called by
+        // execute_chain()
         int subshell_status = execute_chain(command_str);
+        // exit the child process with the exit status of the command
         exit(subshell_status);
     } else {
         // return the exit status to the parent shell
@@ -223,6 +229,7 @@ int run_subshell(char *command_str) {
         if (WIFEXITED(status)) {
             return WEXITSTATUS(status);
         } else if (WIFSIGNALED(status)) {
+            // add 128 for errors
             return 128 + WTERMSIG(status);
         } else {
             return 1;
@@ -400,23 +407,29 @@ int execute_chain(char *chain) {
             continue;
         }
         if (*scanner == '>' || *scanner == '<') {
+            // rediretion operator can vary in length so we keep track of the
+            // start and end of the operator
             char *op_end = scanner;
             char *op_start = scanner;
             int flags;
             int default_fd;
+            // handles <
             if (*op_end == '<') {
                 flags = O_RDONLY;
                 default_fd = STDIN_FILENO;
             } else {
+                // handles >>
                 if (op_end > chain && *(op_end - 1) == '>') {
                     op_start--;
                     flags = O_WRONLY | O_CREAT | O_APPEND;
                     default_fd = STDOUT_FILENO;
                 } else if (op_end > chain && *(op_end - 1) == '<') {
+                    // handles <>
                     op_start--;
                     flags = O_RDWR | O_CREAT;
                     default_fd = STDIN_FILENO;
                 } else {
+                    // handles >
                     flags = O_WRONLY | O_CREAT | O_TRUNC;
                     default_fd = STDOUT_FILENO;
                 }
@@ -424,13 +437,15 @@ int execute_chain(char *chain) {
             char *file = trim_whitespace(op_end + 1);
             int dest_fd = default_fd;
             char *term_point = op_start;
-
+            // handle redirection of a specific file direction ie 1>> or 2<
             if (op_start > chain && isdigit(*(op_start - 1))) {
                 char *num_end = op_start - 1;
                 char *num_start = num_end;
+                // look for the start of the operator
                 while (num_start > chain && isdigit(*(num_start - 1))) {
                     num_start--;
                 }
+                // if a space exists between the fd and the operator ie 1 >>
                 if (num_start == chain || isspace(*(num_start - 1))) {
                     char num_buf[16];
                     int len = (num_end - num_start) + 1;
@@ -443,6 +458,7 @@ int execute_chain(char *chain) {
                 }
             }
             *term_point = '\0';
+            // run redirect with the data parsed from the command
             return run_redirect(chain, file, flags, dest_fd);
         }
         scanner--;
@@ -465,7 +481,7 @@ int execute_chain(char *chain) {
     // upon reaching a parenthesis opening, we run the contents inside the
     // parenthesis as a subshell
     else if (*trimmed_cmd == '(') {
-        // check it is a valid subshell syntax
+        // check it is a valid subshell syntax ie it has a closing parenthesis
         char *end = trimmed_cmd + strlen(trimmed_cmd) - 1;
         if (*end == ')') {
             *end = '\0';
@@ -616,21 +632,25 @@ int check_for_continuation(char *line) {
     }
     char *trimmed_line = trim_whitespace(line_copy);
     len = strlen(trimmed_line);
+    // if the last character in the command is a '\'
     if (len > 0 && line[len - 1] == '\\') {
         line[len - 1] = '\0';
         free(line_copy);
         return 1;
     }
+    // if the last character is a && or a ||
     if (len >= 2 && (strcmp(&trimmed_line[len - 2], "&&") == 0 ||
                      strcmp(&trimmed_line[len - 2], "||") == 0)) {
         free(line_copy);
         return 2;
     }
+    // if the last character is a pipe operator
     if (len >= 1 && trimmed_line[len - 1] == '|' &&
         (len < 2 || trimmed_line[len - 2] != '|')) {
         free(line_copy);
         return 3;
     }
+    // if the last character is a redirection operator
     if (len > 0 &&
         (trimmed_line[len - 1] == '>' || trimmed_line[len - 1] == '<')) {
         free(line_copy);
